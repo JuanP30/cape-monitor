@@ -3,6 +3,8 @@
 // que cualquier Claude lo lea. Claude puede PEDIR cerrar algo (cliente/cape-monitor); la persona aprueba aquí.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod disco;
+mod historial;
 mod medir;
 
 use medir::{Estado, Medidor, Proceso};
@@ -115,6 +117,9 @@ fn bucle(app: AppHandle) {
     let mut ultima_limpieza = Instant::now() - LIMPIEZA_CADA + Duration::from_secs(120); // la primera, a los 2 min
     let mut ultima = Instant::now() - Duration::from_secs(60);
     let mut vistas: Vec<String> = Vec::new();
+    let archivo_hist = carpeta().join("historial.jsonl");
+    let mut ultimo_punto = Instant::now() - Duration::from_secs(120);
+    let mut ultimo_recorte = Instant::now() - Duration::from_secs(7200);
     loop {
         std::thread::sleep(Duration::from_millis(500));
         let st = app.state::<App>();
@@ -137,6 +142,16 @@ fn bucle(app: AppHandle) {
                 }
                 let _ = std::fs::rename(&tmp, dir.join("estado.json"));
             }
+        }
+
+        // Historial: un punto por minuto; se recorta a 7 días cada hora.
+        if ultimo_punto.elapsed() >= Duration::from_secs(60) {
+            ultimo_punto = Instant::now();
+            historial::agregar(&archivo_hist, &historial::punto(&e));
+        }
+        if ultimo_recorte.elapsed() >= Duration::from_secs(3600) {
+            ultimo_recorte = Instant::now();
+            historial::recortar(&archivo_hist, e.hora);
         }
 
         // Alerta: un proceso al +80 % de CPU por 10 minutos (una vez por proceso).
@@ -241,6 +256,22 @@ fn decidir(st: State<App>, id: String, aprobar: bool) -> Result<(), String> {
     r
 }
 
+#[tauri::command]
+fn historial(horas: u64) -> Vec<historial::Punto> {
+    let ahora = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    historial::resumir(&historial::leer(&carpeta().join("historial.jsonl")), ahora, horas.clamp(1, 168), 168)
+}
+
+#[tauri::command]
+async fn analizar_disco() -> Vec<disco::Carpeta> {
+    tauri::async_runtime::spawn_blocking(disco::analizar).await.unwrap_or_default()
+}
+
+#[tauri::command]
+fn mostrar_carpeta(ruta: String) -> Result<(), String> {
+    disco::mostrar(&ruta)
+}
+
 #[cfg(target_os = "macos")]
 fn colocar_mac(w: &tauri::WebviewWindow, desde_icono: bool) -> Option<()> {
     use objc2_app_kit::{NSEvent, NSScreen, NSWindow};
@@ -332,7 +363,7 @@ fn main() {
                 ventana.app_handle().state::<App>().visible.store(false, Ordering::Relaxed);
             }
         })
-        .invoke_handler(tauri::generate_handler![estado, cerrar, limpiar, decidir])
+        .invoke_handler(tauri::generate_handler![estado, cerrar, limpiar, decidir, historial, analizar_disco, mostrar_carpeta])
         .run(tauri::generate_context!())
         .expect("no pude arrancar CAPE Monitor");
 }

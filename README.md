@@ -5,6 +5,9 @@ limpia solo lo **olvidado** (servidores y navegadores de pruebas huérfanos de m
 lo revise sin tocar nada sin permiso.
 
 - **Abrir:** clic en el cohete o **⌘⇧M**. Arranca sola al encender el Mac.
+- **Panel:** memoria (con presión), procesador por núcleo y temperatura del chip, red, disco, batería (salud como la
+  muestra macOS, ciclos, temperatura), batería de ratón/teclado/AirPods, historial de 1 h / 24 h / 7 días
+  (`~/.cape/monitor/historial.jsonl`, un punto por minuto) y «Qué ocupa el disco» bajo pedido.
 - **Avisos:** un proceso al +80 % de CPU por 10 min, disco con menos de 10 % libre, memoria al límite,
   limpieza hecha, y cuando Claude pide cerrar algo.
 - **Limpieza automática** cada 15 min, **solo** de olvidados (reglas y pruebas en `src-tauri/src/medir.rs`).

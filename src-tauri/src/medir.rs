@@ -2,7 +2,8 @@
 // Todo lo que lee la app y lo que lee Claude sale de aquí, en un solo `Estado`.
 use serde::Serialize;
 use std::process::Command;
-use sysinfo::{Disks, Networks, Pid, ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
+use sysinfo::{Components, Disks, Networks, Pid, ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
+use std::time::{Duration, Instant};
 
 #[derive(Serialize, Clone, Default)]
 pub struct Estado {
@@ -21,6 +22,16 @@ pub struct Estado {
     pub olvidados: Vec<Proceso>,
     pub claude: Grupo,
     pub docker: Grupo,
+    pub temp_chip: Option<f32>,
+    pub temp_bateria: Option<f32>,
+    pub temp_disco: Option<f32>,
+    pub dispositivos: Vec<Dispositivo>, // ratón, teclado, AirPods… con su batería
+}
+
+#[derive(Serialize, Clone, Default)]
+pub struct Dispositivo {
+    pub nombre: String,
+    pub pct: u8,
 }
 
 #[derive(Serialize, Clone, Default)]
@@ -86,10 +97,15 @@ pub struct Medidor {
     sys: System,
     redes: Networks,
     discos: Disks,
-    ultima: std::time::Instant,
+    sensores: Components,
+    ultima: Instant,
     bateria: Option<Bateria>,
     presion: u8,
-    lenta: u32,
+    temps: (Option<f32>, Option<f32>, Option<f32>),
+    dispositivos: Vec<Dispositivo>,
+    salud: Option<u8>,
+    cada_minuto: Option<Instant>,
+    cada_10min: Option<Instant>,
 }
 
 impl Medidor {
@@ -100,10 +116,15 @@ impl Medidor {
             sys,
             redes: Networks::new_with_refreshed_list(),
             discos: Disks::new_with_refreshed_list(),
-            ultima: std::time::Instant::now(),
+            sensores: Components::new_with_refreshed_list(),
+            ultima: Instant::now(),
             bateria: None,
             presion: 1,
-            lenta: 0,
+            temps: (None, None, None),
+            dispositivos: Vec::new(),
+            salud: None,
+            cada_minuto: None,
+            cada_10min: None,
         }
     }
 
@@ -118,13 +139,26 @@ impl Medidor {
             ProcessRefreshKind::nothing().with_cpu().with_memory().with_cmd(UpdateKind::OnlyIfNotSet).with_exe(UpdateKind::OnlyIfNotSet),
         );
         self.redes.refresh(true);
-        // Lo que cuesta lanzar un programa (batería, presión) y el disco, cada ~1 min.
-        if self.lenta % 4 == 0 {
+        // Lo que cuesta lanzar un programa (batería, presión, sensores, disco): cada minuto.
+        if self.cada_minuto.map_or(true, |t| t.elapsed() >= Duration::from_secs(60)) {
+            self.cada_minuto = Some(Instant::now());
             self.discos.refresh(true);
-            self.bateria = leer_bateria();
             self.presion = leer_presion();
+            self.sensores.refresh(true);
+            self.temps = temperaturas(&self.sensores);
+            self.dispositivos = parse_dispositivos(&salida("ioreg", &["-r", "-k", "BatteryPercent"]));
+            // La salud que muestra macOS («Capacidad máxima» en Ajustes) sale de system_profiler: lento, cada 10 min.
+            if self.cada_10min.map_or(true, |t| t.elapsed() >= Duration::from_secs(600)) {
+                self.cada_10min = Some(Instant::now());
+                self.salud = parse_salud(&salida("system_profiler", &["SPPowerDataType"]));
+            }
+            self.bateria = leer_bateria().map(|mut b| {
+                if self.salud.is_some() {
+                    b.salud = self.salud;
+                }
+                b
+            });
         }
-        self.lenta += 1;
 
         let mio = std::process::id();
         let mut todos: Vec<Proceso> = Vec::new();
@@ -182,6 +216,10 @@ impl Medidor {
             olvidados,
             claude,
             docker,
+            temp_chip: self.temps.0,
+            temp_bateria: self.temps.1,
+            temp_disco: self.temps.2,
+            dispositivos: self.dispositivos.clone(),
         }
     }
 
@@ -214,6 +252,45 @@ fn resumir(cmd: &str) -> String {
 
 fn salida(prog: &str, args: &[&str]) -> String {
     Command::new(prog).args(args).output().map(|o| String::from_utf8_lossy(&o.stdout).into_owned()).unwrap_or_default()
+}
+
+/// Chip = el sensor de núcleo («tdie») más caliente; batería = «gas gauge»; disco = «NAND».
+fn temperaturas(c: &Components) -> (Option<f32>, Option<f32>, Option<f32>) {
+    let mut chip: Option<f32> = None;
+    let (mut bat, mut disco) = (None, None);
+    for s in c.list() {
+        let (l, t) = (s.label().to_lowercase(), s.temperature());
+        let Some(t) = t.filter(|t| *t > 0.0 && *t < 130.0) else { continue };
+        if l.contains("tdie") {
+            chip = Some(chip.map_or(t, |c| c.max(t)));
+        } else if l.contains("battery") {
+            bat = Some(t);
+        } else if l.contains("nand") {
+            disco = Some(t);
+        }
+    }
+    (chip, bat, disco)
+}
+
+pub fn parse_salud(sp: &str) -> Option<u8> {
+    sp.lines().find(|l| l.contains("Maximum Capacity"))?.split(':').nth(1)?.trim().trim_end_matches('%').trim().parse().ok()
+}
+
+pub fn parse_dispositivos(ioreg: &str) -> Vec<Dispositivo> {
+    // Cada bloque de ioreg trae "Product" y "BatteryPercent"; se emparejan en orden.
+    let mut out = Vec::new();
+    let mut nombre: Option<String> = None;
+    for l in ioreg.lines() {
+        let l = l.trim();
+        if let Some(v) = l.strip_prefix("\"Product\" = ") {
+            nombre = Some(v.trim_matches('"').to_string());
+        } else if let Some(v) = l.strip_prefix("\"BatteryPercent\" = ") {
+            if let (Some(n), Ok(p)) = (nombre.take(), v.trim().parse()) {
+                out.push(Dispositivo { nombre: n, pct: p });
+            }
+        }
+    }
+    out
 }
 
 fn leer_presion() -> u8 {
@@ -293,5 +370,14 @@ mod pruebas {
         let b = parse_bateria(ac, "").unwrap();
         assert_eq!((b.pct, b.enchufado, b.cargando, b.restante.as_str()), (95, true, false, ""));
         assert!(parse_bateria("Now drawing from 'AC Power'\n", "").is_none(), "Mac de escritorio: sin batería");
+    }
+
+    #[test]
+    fn salud_como_la_muestra_macos_y_dispositivos() {
+        assert_eq!(parse_salud("      Health Information:\n          Cycle Count: 60\n          Condition: Normal\n          Maximum Capacity: 99 %\n"), Some(99));
+        assert_eq!(parse_salud("sin batería"), None);
+        let io = "+-o Mouse\n    {\n      \"Product\" = \"Juan Mouse\"\n      \"BatteryPercent\" = 72\n    }\n      \"Product\" = \"AirPods\"\n      \"BatteryPercent\" = 40\n";
+        let d = parse_dispositivos(io);
+        assert_eq!(d.iter().map(|x| (x.nombre.as_str(), x.pct)).collect::<Vec<_>>(), vec![("Juan Mouse", 72), ("AirPods", 40)]);
     }
 }
