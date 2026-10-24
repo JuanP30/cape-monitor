@@ -32,7 +32,7 @@ e = json.load(open(sys.argv[1]))
 g = lambda b: f"{b/2**30:.1f} GB"
 print(f"Medido hace {int(time.time()-e['hora'])} s")
 print(f"CPU {e['cpu']:.0f} % · Memoria {e['mem_usada']/e['mem_total']*100:.0f} % ({g(e['mem_usada'])}/{g(e['mem_total'])}) presión={ {1:'normal',2:'justa',4:'al límite'}.get(e['presion'], e['presion']) } · swap {g(e['swap_usada'])}")
-print(f"Disco: {g(e['disco_libre'])} libres de {g(e['disco_total'])}")
+print(f"Disco: {e['disco_libre']/1e9:.0f} GB libres de {e['disco_total']/1e9:.0f} GB")
 b = e.get('bateria')
 if b: print(f"Batería {b['pct']} % {'cargando' if b['cargando'] else 'enchufado' if b['enchufado'] else 'en batería'} {b['restante']} · salud {b['salud']} % · {b['ciclos']} ciclos")
 print(f"Claude: {e['claude']['sesiones']} sesiones, {g(e['claude']['mem'])} · Docker: {'activo '+g(e['docker']['mem']) if e['docker']['activo'] else 'cerrado'}")
