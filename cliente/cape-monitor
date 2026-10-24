@@ -1,0 +1,56 @@
+#!/usr/bin/env bash
+# CAPE Monitor para Claude: leer cómo está el Mac y PEDIR acciones. Cerrar algo lo aprueba la persona
+# en el panel (el cohete de la barra); limpiar «olvidados» se hace sin preguntar (es la regla acordada).
+#   cape-monitor                 → resumen: CPU, memoria, disco, batería, lo que más gasta, olvidados
+#   cape-monitor json            → el estado completo (JSON)
+#   cape-monitor limpiar         → cierra los procesos de prueba olvidados (huérfanos, de más de 2 h)
+#   cape-monitor cerrar <pid> "<motivo>"   → pide cerrar un proceso; espera la respuesta hasta 2 min
+set -uo pipefail
+D="$HOME/.cape/monitor"
+E="$D/estado.json"
+[ -s "$E" ] || { echo "CAPE Monitor no está corriendo (abre «CAPE Monitor» en Aplicaciones)." >&2; exit 1; }
+
+esperar() {  # $1 = id
+  for _ in $(seq 1 120); do
+    if [ -s "$D/respuestas/$1.json" ]; then cat "$D/respuestas/$1.json"; echo; rm -f "$D/respuestas/$1.json"; return 0; fi
+    sleep 1
+  done
+  echo "Sin respuesta todavía: la persona aún no lo aprueba en el panel (sigue pendiente)."
+}
+
+pedir() {  # $1 = json
+  local id; id="claude-$(date +%s)-$$"
+  printf '%s' "$1" > "$D/solicitudes/$id.json.tmp" && mv "$D/solicitudes/$id.json.tmp" "$D/solicitudes/$id.json"
+  esperar "$id"
+}
+
+case "${1:-}" in
+  ""|resumen)
+    /usr/bin/python3 - "$E" <<'PY'
+import json, sys, time
+e = json.load(open(sys.argv[1]))
+g = lambda b: f"{b/2**30:.1f} GB"
+print(f"Medido hace {int(time.time()-e['hora'])} s")
+print(f"CPU {e['cpu']:.0f} % · Memoria {e['mem_usada']/e['mem_total']*100:.0f} % ({g(e['mem_usada'])}/{g(e['mem_total'])}) presión={ {1:'normal',2:'justa',4:'al límite'}.get(e['presion'], e['presion']) } · swap {g(e['swap_usada'])}")
+print(f"Disco: {g(e['disco_libre'])} libres de {g(e['disco_total'])}")
+b = e.get('bateria')
+if b: print(f"Batería {b['pct']} % {'cargando' if b['cargando'] else 'enchufado' if b['enchufado'] else 'en batería'} {b['restante']} · salud {b['salud']} % · {b['ciclos']} ciclos")
+print(f"Claude: {e['claude']['sesiones']} sesiones, {g(e['claude']['mem'])} · Docker: {'activo '+g(e['docker']['mem']) if e['docker']['activo'] else 'cerrado'}")
+print("\nLo que más gasta:")
+for p in e['top'][:6]: print(f"  {p['pid']:>6}  {p['cpu']:5.0f} %  {p['mem']/1e6:7.0f} MB  {p['nombre']}")
+print("\nOlvidados:" if e['olvidados'] else "\nOlvidados: ninguno")
+for p in e['olvidados'][:10]: print(f"  {p['pid']:>6}  {p['cpu']:5.0f} %  {p['detalle']}")
+if len(e['olvidados']) > 10: print(f"  … y {len(e['olvidados'])-10} más (cape-monitor limpiar los cierra)")
+PY
+    ;;
+  json) cat "$E" ;;
+  limpiar) pedir '{"accion":"limpiar"}' ;;
+  cerrar)
+    [ -n "${2:-}" ] || { echo "Uso: cape-monitor cerrar <pid> \"<motivo>\"" >&2; exit 1; }
+    nombre=$(ps -o comm= -p "$2" 2>/dev/null | xargs basename 2>/dev/null) || true
+    [ -n "$nombre" ] || { echo "No existe el proceso $2" >&2; exit 1; }
+    motivo=$(printf '%s' "${3:-}" | tr -d '"\\' | cut -c1-200)
+    echo "Pedí cerrar $nombre ($2). Esperando que la persona lo apruebe en CAPE Monitor…"
+    pedir "{\"accion\":\"cerrar\",\"pid\":$2,\"nombre\":\"$nombre\",\"motivo\":\"$motivo\"}" ;;
+  *) sed -n '2,8p' "$0"; exit 1 ;;
+esac
