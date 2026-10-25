@@ -133,8 +133,9 @@ pub fn clasificar(grupo: &str, cmd: &str, mem: u64, procesos: u32, sesiones: u32
     let navegador = ["Brave Browser", "Google Chrome", "Safari", "Arc", "Microsoft Edge", "Firefox"].contains(&nombre.as_str());
     if cmd.contains("GradleDaemon") || cmd.contains("KotlinCompileDaemon") {
         ("Gradle (compilar apps Android)".into(), "Queda abierto después de compilar. Ciérralo: vuelve solo cuando haga falta.".into(), 2, "cerrar")
-    } else if nombre == "mysqld" && cmd.contains("clon-sispro") {
-        ("Base de datos del clon de SISPRO".into(), "La usan las sesiones para probar SISPRO. Ciérrala solo si ninguna está probando.".into(), 0, "")
+    } else if nombre == "mysqld" && cmd.contains("--datadir=/Users/") {
+        // Base con sus datos dentro de un proyecto: la usan las pruebas de ese proyecto, no se ofrece cerrar.
+        ("Base de datos de un proyecto".into(), "La usan tus pruebas de ese proyecto. Ciérrala solo si no estás probando nada.".into(), 0, "")
     } else if nombre == "mysqld" {
         ("Base de datos MySQL".into(), "Ciérrala si no estás probando nada que la use.".into(), 1, "cerrar")
     } else if nombre == "Finder" && mem > 700 * (1 << 20) {
@@ -492,7 +493,7 @@ mod pruebas {
         assert_eq!(grupo_de("mysqld", "/opt/homebrew/opt/mysql/bin/mysqld", "", 9), "mysqld#9");
         let gb = 1u64 << 30;
         assert_eq!(clasificar("java#53", "x GradleDaemon 8.11", gb, 1, 0).2, 2, "Gradle olvidado: ciérralo");
-        assert_eq!(clasificar("mysqld#9", "mysqld --datadir=/Users/u/Documents/clon-sispro/mysql-data", gb, 1, 0).3, "", "el clon no se ofrece cerrar");
+        assert_eq!(clasificar("mysqld#9", "mysqld --datadir=/Users/u/proyecto/mysql-data", gb, 1, 0).3, "", "la base de un proyecto no se ofrece cerrar");
         assert_eq!(clasificar("Finder", "", gb, 1, 0).3, "reiniciar");
         assert_eq!(clasificar("Finder", "", 200 << 20, 1, 0).2, 0, "Finder liviano: nada que hacer");
         assert!(clasificar("Brave Browser", "", gb, 22, 0).1.starts_with("22 procesos"));
@@ -515,8 +516,8 @@ mod pruebas {
     fn salud_como_la_muestra_macos_y_dispositivos() {
         assert_eq!(parse_salud("      Health Information:\n          Cycle Count: 60\n          Condition: Normal\n          Maximum Capacity: 99 %\n"), Some(99));
         assert_eq!(parse_salud("sin batería"), None);
-        let io = "+-o Mouse\n    {\n      \"Product\" = \"Juan Mouse\"\n      \"BatteryPercent\" = 72\n    }\n      \"Product\" = \"AirPods\"\n      \"BatteryPercent\" = 40\n";
+        let io = "+-o Mouse\n    {\n      \"Product\" = \"Mi Mouse\"\n      \"BatteryPercent\" = 72\n    }\n      \"Product\" = \"AirPods\"\n      \"BatteryPercent\" = 40\n";
         let d = parse_dispositivos(io);
-        assert_eq!(d.iter().map(|x| (x.nombre.as_str(), x.pct)).collect::<Vec<_>>(), vec![("Juan Mouse", 72), ("AirPods", 40)]);
+        assert_eq!(d.iter().map(|x| (x.nombre.as_str(), x.pct)).collect::<Vec<_>>(), vec![("Mi Mouse", 72), ("AirPods", 40)]);
     }
 }
