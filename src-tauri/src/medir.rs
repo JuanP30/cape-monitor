@@ -10,8 +10,12 @@ pub struct Estado {
     pub hora: u64,
     pub cpu: f32,
     pub nucleos: Vec<f32>,
-    pub mem_usada: u64,
+    pub mem_usada: u64, // como el Monitor de Actividad: apps + fija + comprimida
     pub mem_total: u64,
+    pub mem_apps: u64,
+    pub mem_fija: u64,       // «wired»: la del sistema, no se libera
+    pub mem_comprimida: u64, // lo que macOS apretó porque no cabía
+    pub mem_cache: u64,      // archivos en caché: se libera sola cuando hace falta
     pub swap_usada: u64,
     pub presion: u8, // 1 normal · 2 aviso · 4 crítica (lo que macOS llama «presión de memoria»)
     pub disco_libre: u64,
@@ -19,6 +23,7 @@ pub struct Estado {
     pub red: Red,
     pub bateria: Option<Bateria>,
     pub top: Vec<Proceso>,
+    pub liberar: Vec<Consumo>, // memoria por app, de mayor a menor, con consejo
     pub olvidados: Vec<Proceso>,
     pub claude: Grupo,
     pub docker: Grupo,
@@ -62,6 +67,19 @@ pub struct Proceso {
     pub detalle: String, // para olvidados: qué es y de dónde salió
 }
 
+/// Una app (todos sus procesos juntos) o un programa suelto, con lo que conviene hacer.
+#[derive(Serialize, Clone, Default)]
+pub struct Consumo {
+    pub nombre: String,
+    pub mem: u64,
+    pub procesos: u32,
+    pub pid: u32,          // el proceso principal: al que se le da «Cerrar»/«Reiniciar»
+    pub proceso: String,   // su nombre, para comprobar que el pid no cambió de dueño
+    pub consejo: String,
+    pub nivel: u8,         // 2 = ciérralo · 1 = depende de ti · 0 = solo informativo
+    pub accion: String,    // "cerrar", "reiniciar" o "" (se cierra a mano, p. ej. pestañas)
+}
+
 #[derive(Serialize, Clone, Default)]
 pub struct Grupo {
     pub activo: bool,
@@ -91,6 +109,68 @@ pub fn olvidado(cmd: &str, padre: u32, edad_s: u64) -> Option<&'static str> {
     } else {
         None
     }
+}
+
+/// A qué grupo va un proceso: la app (.app) que lo contiene, o el programa suelto.
+/// Gradle y las bases de datos van cada una aparte (cada una tiene su consejo).
+pub fn grupo_de(nombre: &str, exe: &str, cmd: &str, pid: u32) -> String {
+    if exe.contains("/Claude.app/") || exe.contains("/claude-code/") {
+        return "Claude".into();
+    }
+    if cmd.contains("GradleDaemon") || cmd.contains("KotlinCompileDaemon") || nombre == "mysqld" {
+        return format!("{nombre}#{pid}");
+    }
+    match exe.find(".app/") {
+        Some(i) => exe[..i].rsplit('/').next().unwrap_or(nombre).to_string(),
+        None => nombre.to_string(),
+    }
+}
+
+/// Nombre que se muestra, consejo, nivel y acción para un grupo.
+/// ponytail: reglas fijas para lo que de verdad aparece en este Mac; se agrega una cuando salga otra cosa grande.
+pub fn clasificar(grupo: &str, cmd: &str, mem: u64, procesos: u32, sesiones: u32) -> (String, String, u8, &'static str) {
+    let nombre = grupo.split('#').next().unwrap_or(grupo).to_string();
+    let navegador = ["Brave Browser", "Google Chrome", "Safari", "Arc", "Microsoft Edge", "Firefox"].contains(&nombre.as_str());
+    if cmd.contains("GradleDaemon") || cmd.contains("KotlinCompileDaemon") {
+        ("Gradle (compilar apps Android)".into(), "Queda abierto después de compilar. Ciérralo: vuelve solo cuando haga falta.".into(), 2, "cerrar")
+    } else if nombre == "mysqld" && cmd.contains("clon-sispro") {
+        ("Base de datos del clon de SISPRO".into(), "La usan las sesiones para probar SISPRO. Ciérrala solo si ninguna está probando.".into(), 0, "")
+    } else if nombre == "mysqld" {
+        ("Base de datos MySQL".into(), "Ciérrala si no estás probando nada que la use.".into(), 1, "cerrar")
+    } else if nombre == "Finder" && mem > 700 * (1 << 20) {
+        ("Finder".into(), "Está pesado. Reiniciarlo lo deja liviano y no pierdes nada.".into(), 2, "reiniciar")
+    } else if nombre == "Claude" {
+        ("Claude".into(), format!("{sesiones} sesiones abiertas: archiva las que ya terminaron."), 1, "")
+    } else if navegador {
+        (nombre, format!("{procesos} procesos: cada pestaña es uno. Cierra las que no uses."), 1, "")
+    } else if nombre == "Docker" || nombre == "com.docker.backend" {
+        ("Docker".into(), "Ciérralo si no lo estás usando.".into(), 1, "")
+    } else {
+        (nombre, String::new(), 0, "")
+    }
+}
+
+/// Memoria «física» de un proceso como la cuenta el Monitor de Actividad (incluye lo comprimido).
+/// Si macOS no deja leerla (procesos del sistema), se usa la residente.
+fn huella(pid: u32, residente: u64) -> u64 {
+    #[cfg(target_os = "macos")]
+    unsafe {
+        let mut r: libc::rusage_info_v2 = std::mem::zeroed();
+        if libc::proc_pid_rusage(pid as i32, libc::RUSAGE_INFO_V2, &mut r as *mut _ as *mut libc::rusage_info_t) == 0 {
+            return r.ri_phys_footprint;
+        }
+    }
+    let _ = pid;
+    residente
+}
+
+/// De `vm_stat`: (apps, fija, comprimida, caché) en bytes, como los reparte el Monitor de Actividad.
+pub fn parse_vm_stat(t: &str) -> Option<(u64, u64, u64, u64)> {
+    let pagina: u64 = t.split("page size of ").nth(1)?.split(' ').next()?.parse().ok()?;
+    let v = |k: &str| -> Option<u64> { t.lines().find(|l| l.starts_with(k))?.split(':').nth(1)?.trim().trim_end_matches('.').parse().ok() };
+    let purgable = v("Pages purgeable")?;
+    let apps = v("Anonymous pages")?.saturating_sub(purgable);
+    Some((apps * pagina, v("Pages wired down")? * pagina, v("Pages occupied by compressor")? * pagina, (v("File-backed pages")? + purgable) * pagina))
 }
 
 pub struct Medidor {
@@ -163,13 +243,25 @@ impl Medidor {
         let mio = std::process::id();
         let mut todos: Vec<Proceso> = Vec::new();
         let mut olvidados = Vec::new();
+        let mut grupos: std::collections::HashMap<String, (Consumo, String, u64)> = std::collections::HashMap::new(); // (consumo, cmd del principal, mem del principal)
         let (mut claude, mut docker) = (Grupo::default(), Grupo::default());
         for (pid, p) in self.sys.processes() {
             let cmd = p.cmd().iter().map(|s| s.to_string_lossy()).collect::<Vec<_>>().join(" ");
             let exe = p.exe().map(|e| e.to_string_lossy().into_owned()).unwrap_or_default();
             let nombre = p.name().to_string_lossy().into_owned();
             let padre = p.parent().map(|x| x.as_u32()).unwrap_or(0);
-            let pr = Proceso { pid: pid.as_u32(), nombre: nombre.clone(), cpu: p.cpu_usage(), mem: p.memory(), edad_s: p.run_time(), detalle: String::new() };
+            let pr = Proceso { pid: pid.as_u32(), nombre: nombre.clone(), cpu: p.cpu_usage(), mem: huella(pid.as_u32(), p.memory()), edad_s: p.run_time(), detalle: String::new() };
+            let g = grupos.entry(grupo_de(&nombre, &exe, &cmd, pr.pid)).or_default();
+            g.0.mem += pr.mem;
+            g.0.procesos += 1;
+            // El principal = el que no es «Helper» y, entre esos, el más grande.
+            let peso = if nombre.contains("Helper") { 0 } else { pr.mem + 1 };
+            if peso > g.2 || g.0.pid == 0 {
+                g.2 = peso;
+                g.0.pid = pr.pid;
+                g.0.proceso = nombre.clone();
+                g.1 = cmd.clone();
+            }
             if exe.contains("/Claude.app/") || exe.contains("/claude-code/") {
                 claude.mem += pr.mem;
                 claude.cpu += pr.cpu;
@@ -192,6 +284,24 @@ impl Medidor {
         todos.sort_by(|a, b| b.cpu.total_cmp(&a.cpu).then(b.mem.cmp(&a.mem)));
         todos.truncate(6);
 
+        let mut liberar: Vec<Consumo> = grupos
+            .into_iter()
+            .map(|(clave, (mut c, cmd, _))| {
+                let (nombre, consejo, nivel, accion) = clasificar(&clave, &cmd, c.mem, c.procesos, claude.sesiones);
+                c.nombre = nombre;
+                c.consejo = consejo;
+                c.nivel = nivel;
+                c.accion = accion.into();
+                c
+            })
+            .filter(|c| c.mem >= 150 * (1 << 20) || c.nivel == 2)
+            .collect();
+        liberar.sort_by(|a, b| b.mem.cmp(&a.mem));
+        liberar.truncate(12);
+
+        let (mem_apps, mem_fija, mem_comprimida, mem_cache) = parse_vm_stat(&salida("vm_stat", &[])).unwrap_or_default();
+        let mem_usada = if mem_apps > 0 { mem_apps + mem_fija + mem_comprimida } else { self.sys.used_memory() };
+
         let (disco_total, disco_libre) = self
             .discos
             .list()
@@ -204,8 +314,12 @@ impl Medidor {
             hora: std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0),
             cpu: self.sys.global_cpu_usage(),
             nucleos: self.sys.cpus().iter().map(|c| c.cpu_usage()).collect(),
-            mem_usada: self.sys.used_memory(),
+            mem_usada,
             mem_total: self.sys.total_memory(),
+            mem_apps,
+            mem_fija,
+            mem_comprimida,
+            mem_cache,
             swap_usada: self.sys.used_swap(),
             presion: self.presion,
             disco_libre,
@@ -213,6 +327,7 @@ impl Medidor {
             red: self.red(seg),
             bateria: self.bateria.clone(),
             top: todos,
+            liberar,
             olvidados,
             claude,
             docker,
@@ -358,6 +473,30 @@ mod pruebas {
                     "/Applications/Docker.app/Contents/MacOS/com.docker.backend", "php artisan queue:work"] {
             assert_eq!(olvidado(cmd, 1, 30 * 86400), None, "{cmd}");
         }
+    }
+
+    #[test]
+    fn memoria_como_el_monitor_de_actividad() {
+        let vm = "Mach Virtual Memory Statistics: (page size of 16384 bytes)\nPages free:  6699.\nPages wired down:  192012.\nPages purgeable:  409.\nFile-backed pages:  121525.\nAnonymous pages:  301115.\nPages occupied by compressor:  371387.\n";
+        let (apps, fija, comp, cache) = parse_vm_stat(vm).unwrap();
+        assert_eq!((apps, fija, comp, cache), ((301115 - 409) * 16384, 192012 * 16384, 371387 * 16384, (121525 + 409) * 16384));
+        assert!(parse_vm_stat("basura").is_none());
+    }
+
+    #[test]
+    fn grupos_y_consejos() {
+        let brave = "/Applications/Brave Browser.app/Contents/Frameworks/Brave Browser Framework.framework/Versions/1/Helpers/Brave Browser Helper (Renderer).app/Contents/MacOS/Brave Browser Helper (Renderer)";
+        assert_eq!(grupo_de("Brave Browser Helper (Renderer)", brave, "", 7), "Brave Browser");
+        assert_eq!(grupo_de("node", "/Users/u/.local/share/claude-code/node", "", 7), "Claude");
+        assert_eq!(grupo_de("java", "/opt/homebrew/bin/java", "java -cp x org.gradle.launcher.daemon.bootstrap.GradleDaemon 8.11", 53), "java#53");
+        assert_eq!(grupo_de("mysqld", "/opt/homebrew/opt/mysql/bin/mysqld", "", 9), "mysqld#9");
+        let gb = 1u64 << 30;
+        assert_eq!(clasificar("java#53", "x GradleDaemon 8.11", gb, 1, 0).2, 2, "Gradle olvidado: ciérralo");
+        assert_eq!(clasificar("mysqld#9", "mysqld --datadir=/Users/u/Documents/clon-sispro/mysql-data", gb, 1, 0).3, "", "el clon no se ofrece cerrar");
+        assert_eq!(clasificar("Finder", "", gb, 1, 0).3, "reiniciar");
+        assert_eq!(clasificar("Finder", "", 200 << 20, 1, 0).2, 0, "Finder liviano: nada que hacer");
+        assert!(clasificar("Brave Browser", "", gb, 22, 0).1.starts_with("22 procesos"));
+        assert_eq!(clasificar("WindowServer", "", gb, 1, 0).2, 0);
     }
 
     #[test]

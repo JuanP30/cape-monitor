@@ -3,6 +3,8 @@
 const { invoke } = window.__TAURI__.core;
 const vista = document.getElementById('vista');
 const salud = document.getElementById('salud');
+const pestanas = document.getElementById('pestanas');
+let seccion = 'resumen';
 const NS = 'http://www.w3.org/2000/svg';
 
 function h(tag, attrs = {}, ...hijos) {
@@ -105,6 +107,41 @@ function bloqueDisco() {
         })),
   ];
 }
+// Liberar RAM: en qué se va la memoria y qué conviene cerrar. Los consejos los decide Rust (medir.rs → clasificar).
+function bloqueLiberar(e) {
+  const partes = [
+    ['Apps', e.mem_apps, 'var(--m500)'], ['Comprimida', e.mem_comprimida, 'var(--warn)'],
+    ['Sistema', e.mem_fija, 'var(--m300)'], ['Caché', e.mem_cache, 'var(--teal)'],
+  ];
+  const barra = h('div', { class: 'reparto' }, partes.map(([, v, c]) => { const b = h('b', {}); b.style.width = (v / e.mem_total) * 100 + '%'; b.style.background = c; return b; }));
+  const libre = Math.max(0, e.mem_total - e.mem_usada - e.mem_cache);
+  const resumen = e.presion >= 4
+    ? `El Mac se está quedando sin memoria: ya comprimió ${gib(e.mem_comprimida)} y usa ${gib(e.swap_usada)} del disco. Cierra algo de abajo ya.`
+    : e.presion >= 2 || e.swap_usada > 1e9
+      ? `La memoria está justa: macOS comprimió ${gib(e.mem_comprimida)}${e.swap_usada > 0.5e9 ? ` y pasó ${gib(e.swap_usada)} al disco` : ''}. Cerrar lo de abajo se nota enseguida.`
+      : 'Hay memoria de sobra: no hace falta cerrar nada.';
+  const fila = (c) => h('div', { class: 'p' },
+    h('div', { class: 'n' }, h('b', {}, c.nombre), c.consejo ? h('span', { class: 'consejo' }, c.consejo) : h('span', {}, `${c.procesos} proceso${c.procesos > 1 ? 's' : ''}`)),
+    h('div', { class: 'num', style: 'color:var(--tx);font-weight:600' }, mb(c.mem)),
+    c.accion ? botonCerrar({ pid: c.pid, nombre: c.proceso }, c.accion === 'reiniciar' ? 'Reiniciar' : 'Cerrar') : null);
+  const grupo = (titulo, lista, vacio) => lista.length || vacio ? [h('div', { class: 'sec' }, titulo),
+    h('div', { class: 'lista' }, lista.length ? lista.map(fila) : h('div', { class: 'vacio' }, vacio))] : [];
+  return [
+    h('div', { class: 't' }, h('h3', {}, 'En qué se va la memoria', h('span', { class: 'der' }, `${gib(libre)} libres`)), barra,
+      h('div', { class: 'leyenda' }, partes.map(([n, v, c]) => h('span', {}, h('i', { style: `background:${c}` }), `${n} ${gib(v)}`))),
+      h('div', { class: 'sub', style: 'margin-top:8px' }, resumen)),
+    ...grupo('Ciérralo', e.liberar.filter((c) => c.nivel === 2), 'Nada que cerrar sí o sí.'),
+    ...grupo('Depende de ti', e.liberar.filter((c) => c.nivel === 1)),
+    ...grupo('Lo demás', e.liberar.filter((c) => c.nivel === 0)),
+    h('div', { class: 'sec' }, 'Consejos'),
+    h('div', { class: 'lista' }, [
+      'La caché y la memoria comprimida son normales: macOS las usa para ir rápido y las suelta solo.',
+      'En Brave: Ajustes → Sistema → «Ahorro de memoria» duerme las pestañas que no estás mirando.',
+      'Si el Mac lleva días sin reiniciarse y va lento, reiniciarlo libera todo lo acumulado.',
+    ].map((t) => h('div', { class: 'vacio' }, t))),
+  ];
+}
+
 const confirmar = new Map(); // pid → hasta cuándo vale el «¿Seguro?»
 
 async function ip() {
@@ -113,16 +150,16 @@ async function ip() {
   try { ipPublica = (await (await fetch('https://api.ipify.org')).text()).trim(); } catch { ipPublica = ''; }
 }
 
-function botonCerrar(p) {
+function botonCerrar(p, texto = 'Cerrar') {
   const armado = (confirmar.get(p.pid) || 0) > Date.now();
-  return h('button', { class: armado ? 'btn seguro' : 'btn', title: armado ? 'Clic otra vez para cerrar' : 'Cerrar este proceso',
+  return h('button', { class: armado ? 'btn seguro' : 'btn', title: armado ? 'Clic otra vez para confirmar' : `${texto} este proceso`,
     onclick: async (ev) => {
       ev.stopPropagation();
       if (!armado) { confirmar.set(p.pid, Date.now() + 4000); pintar(); setTimeout(pintar, 4100); return; }
       confirmar.delete(p.pid);
       try { await invoke('cerrar', { pid: p.pid, nombre: p.nombre }); } catch (e) { alertaEn(String(e)); }
       refrescar();
-    } }, armado ? '¿Seguro?' : 'Cerrar');
+    } }, armado ? '¿Seguro?' : texto);
 }
 
 let mensaje = '', mensajeHasta = 0;
@@ -152,6 +189,7 @@ function pintar() {
       h('div', { class: 'fila2' }, h('div', {}, h('div', { class: 'grande' }, pct(memPct)), h('div', { class: 'sub' }, `${gib(e.mem_usada)} / ${gib(e.mem_total)}`)),
         dona([{ v: memPct, color: e.presion >= 4 ? 'var(--mal)' : e.presion >= 2 ? 'var(--warn)' : 'var(--m500)' }])),
       h('div', { class: 'chips' }, h('span', { class: `chip ${e.presion >= 4 ? 'mal' : e.presion >= 2 ? 'warn' : 'ok'}` }, `presión ${presionTxt}`),
+        e.mem_comprimida > 0.5e9 ? h('span', { class: 'chip' }, `comprimida ${gib(e.mem_comprimida)}`) : null,
         e.swap_usada > 0.5e9 ? h('span', { class: 'chip' }, `swap ${gib(e.swap_usada)}`) : null)),
     h('div', { class: 't' }, h('h3', {}, 'Procesador', e.temp_chip != null ? h('span', { class: `der ${e.temp_chip > 90 ? 'caliente' : ''}` }, `${Math.round(e.temp_chip)} °C`) : null),
       h('div', { class: 'grande' }, pct(e.cpu)),
@@ -197,23 +235,23 @@ function pintar() {
       h('div', { class: `num ${p.cpu > 80 ? 'caliente' : ''}` }, pct(p.cpu)), botonCerrar(p)))),
   ];
 
-  const apps = [
-    h('div', { class: 'sec' }, 'Apps pesadas'),
-    h('div', { class: 'lista' },
-      h('div', { class: 'p' }, h('div', { class: 'n' }, h('b', {}, 'Claude'),
-        h('span', {}, e.claude.activo ? `${e.claude.sesiones} sesiones con proceso abierto · archiva las que ya no uses` : 'cerrado')),
-        h('div', { class: 'num' }, e.claude.activo ? mb(e.claude.mem) : '—')),
-      h('div', { class: 'p' }, h('div', { class: 'n' }, h('b', {}, 'Docker'), h('span', {}, e.docker.activo ? `CPU ${pct(e.docker.cpu)} · ciérralo si no lo estás usando` : 'cerrado')),
-        h('div', { class: 'num' }, e.docker.activo ? mb(e.docker.mem) : '—'))),
-  ];
-
   const historial = limpiados.length ? [h('div', { class: 'sec' }, 'Limpiado hace poco'),
     h('div', { class: 'lista' }, limpiados.map((l) => h('div', { class: 'p' }, h('div', { class: 'n' }, h('span', {}, l)))))] : [];
 
   const aviso = mensaje && Date.now() < mensajeHasta ? h('div', { class: 'lista pedido', style: 'margin-top:10px' }, h('div', { class: 'vacio', style: 'color:var(--mal)' }, mensaje)) : null;
 
+  const recomendados = e.liberar.filter((c) => c.nivel === 2).length;
+  const secciones = [
+    ['resumen', 'Resumen', 0, () => [tarjetas, ...top]],
+    ['ram', 'Liberar RAM', recomendados, () => bloqueLiberar(e)],
+    ['olvidados', 'Olvidados', e.olvidados.length, () => [...olvidados, ...historial]],
+    ['historial', 'Historial', 0, bloqueHistorial],
+    ['disco', 'Disco', 0, bloqueDisco],
+  ];
+  pestanas.replaceChildren(...secciones.map(([id, txt, n]) => h('button', { class: `pest ${seccion === id ? 'on' : ''}`,
+    onclick: () => { if (seccion !== id) { seccion = id; vista.scrollTop = 0; pintar(); } } }, txt, n ? h('i', {}, n) : null)));
   const y = vista.scrollTop;
-  vista.replaceChildren(...[tarjetas, aviso, ...pedidos, ...olvidados, ...bloqueHistorial(), ...top, ...bloqueDisco(), ...apps, ...historial].filter(Boolean),
+  vista.replaceChildren(...[aviso, ...pedidos, ...secciones.find(([id]) => id === seccion)[3]()].filter(Boolean),
     h('div', { class: 'pie' }, '⌘⇧M abre este panel · Claude lo lee con «cape-monitor»'));
   vista.scrollTop = y;
 }

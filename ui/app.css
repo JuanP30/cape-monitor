@@ -18,6 +18,17 @@ body.entrando{animation:aparecer .26s var(--suave)}
 .cohete{width:20px;height:20px;fill:none;stroke:#fff;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
 .marca{font-size:15px;letter-spacing:.01em}.marca b{font-weight:800;letter-spacing:.04em}
 .salud{margin-left:auto;font-size:11.5px;color:#d6c7f6;display:flex;align-items:center;gap:6px}
+.pestanas{display:flex;gap:2px;margin:8px 10px 0;background:var(--pista);border-radius:9px;padding:2px;flex:none}
+.pest{flex:1;border:0;background:none;font:600 11px/1 inherit;color:var(--tx2);padding:6px 2px;border-radius:7px;cursor:pointer;white-space:nowrap;
+  display:flex;align-items:center;justify-content:center;gap:4px;transition:background .15s,color .15s}
+.pest.on{background:var(--tarjeta);color:var(--tx);box-shadow:0 1px 2px rgba(0,0,0,.15)}
+.pest i{font-style:normal;font-size:10px;background:var(--mal);color:#fff;border-radius:8px;padding:1px 5px}
+.reparto{display:flex;height:10px;border-radius:5px;overflow:hidden;background:var(--pista);margin-top:6px}
+.reparto b{display:block;height:100%}
+.leyenda{display:flex;flex-wrap:wrap;gap:4px 12px;margin-top:7px;font-size:11px;color:var(--tx2);font-variant-numeric:tabular-nums}
+.leyenda i{display:inline-block;width:8px;height:8px;border-radius:2px;margin-right:5px}
+.p .n span.consejo{white-space:normal}
+main>.sec:first-child{margin-top:4px}
 main{flex:1;overflow:auto;padding:10px 10px 12px}
 main::-webkit-scrollbar{width:6px}main::-webkit-scrollbar-thumb{background:var(--ln);border-radius:3px}
 .rejilla{display:grid;grid-template-columns:1fr 1fr;gap:8px}
